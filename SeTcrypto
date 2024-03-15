@@ -1,0 +1,102 @@
+#!/bin/sh
+#-----------------------------------------------------------------------#
+# Luks e LVM full disk encryption
+# Este script é experimental
+# Autor: Jefferson Carneiro <slackjeff@riseup.net>
+#-----------------------------------------------------------------------#
+
+TMP="/var/log/setup/tmp"
+T_PX="$(cat $TMP/SeTT_PX)"
+
+dialog --title "!!! IMPORTANT !!!" --yesno "Use (c)fdisk to create your partitions FIRST. For the sake of this example,\
+am going to assume that /dev/sdx1 is a 400 MB to /boot or /efi partition and /dev/sdx2 \
+is the large partition that eats up the remainder of your disk's free space. \
+\n\nDo you wish to proceed?" 15 60
+[ $? -ne 0 ] && exit 1
+
+# Escolha a partição.
+PARTITION=$(dialog --stdout --title "Enter your FULL PATH Partition" --inputbox "Inform your FULL PATH partition where LVM will be created.\
+\nExample: /dev/sda2, /dev/sdb3 etc...\
+\n\ndon't forget to add /dev/" 12 60)
+
+# Nulo?
+if [ -z $PARTITION ]; then
+    dialog --title "!!! Null input !!!" --msgbox "\nPlease give a partition name!!!" 8 40
+    exit 1
+fi
+
+if ! echo "$PARTITION" | grep -qE "^/dev/"; then
+    PARTITION="/dev/$PARTITION"
+fi
+
+# Partição existe? se não existir, informe e saia.
+if [ ! -e "$PARTITION" ]; then
+    dialog --title "$PARTITION Not found." --infobox "$PARTITION dont exist. ABORTING." 5 40
+    sleep 4s
+    exit 1
+fi
+
+# Ok, tudo certo vamos começar.
+dialog --title "Let's start working with LVM" --infobox "\nLet's create a VG, PV AND LV now. Stay tuned." 5 50
+sleep 3s
+
+# Prepare a partição informada pelo usuário!
+cryptsetup -q -y luksFormat $PARTITION
+
+dialog --title "GIVE YOUR PASSWORD" --infobox "\nNow Give your password to open: luks_$(basename $PARTITION)" 5 60
+
+# Abra a partição com um nome mais detalhado!
+# exemplo /dev/sdb2 fica luks_sdb2
+luks_partition="$luks_$(basename $PARTITION)"
+cryptsetup luksOpen $PARTITION "$luks_partition"
+
+# Crie o volume fisico, grupo de volume e volume lógico.
+# O nome que escolhemos é cryptvg
+pvcreate /dev/mapper/$luks_partition >> $TMP/lvtext 2>> $TMP/lvtext
+
+# Crie o grupo de volume.
+vgcreate cryptvg /dev/mapper/$luks_partition >> $TMP/lvtext 2>> $TMP/lvtext
+
+# Crie os volumes lógicos /, /home e swap.
+lvcreate -l 30%FREE -n root cryptvg >> $TMP/lvtext 2>> $TMP/lvtext
+lvcreate -l 60%FREE -n home cryptvg >> $TMP/lvtext 2>> $TMP/lvtext
+lvcreate -l 10%FREE -n swap cryptvg >> $TMP/lvtext 2>> $TMP/lvtext
+
+# Preparee a swap para ser uma partição válida.
+mkswap /dev/cryptvg/swap >> $TMP/lvtext 2>> $TMP/lvtext
+
+dialog --title "Log commands" --textbox $TMP/lvtext 0 0
+
+##### Fim da primeira parte!
+
+##### Segunda parte.
+# Crie um script temporario para fazer a segunda parte
+# da criptografia! Tambem envie um chave para
+# indicar ao instalador que o usuário deseja criptografia
+# de disco.
+
+cat <<EOF > $TMP/tempscriptCryptography
+
+# Gere uma chave de 4096 bits.
+# para não ser necessario
+dialog --title "Generate luks_key" --msgbox "Generate your luks_key with dd... Wait!" 10 60
+dd if=/dev/urandom of=$T_PX/root/.luks_key bs=512 count=8
+sleep 3s
+
+# Usuario precisa entrar com a senha para abrir o volume.
+dialog --title "Enter your password" --msgbox "Please now enter the password you created for your encrypted volume!" 10 60
+
+# Cryptsetup precisa reconhecer a chave.
+cryptsetup luksAddKey $PARTITION $T_PX/root/.luks_key
+
+# Adicione no arquivo crypttab
+echo 'UUID="$(blkid -s UUID -o value $PARTITION) $PARTITION /root/.luks_key luks"' > $T_PX/etc/crypttab
+
+# Informe ao usuário a conclusão
+dialog --title "Sucess." --msgbox "Now your disk is encrypted! Appreciate." 6 50
+EOF
+
+# Envie uma chave para dizer ao setup que
+# utilizamos a criptografia de disco! para fazer
+# o resto do processo acima
+echo "ON" > $TMP/cryptokey
