@@ -1,0 +1,2 @@
+# Installer
+Custom Installer Slackware
